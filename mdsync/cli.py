@@ -320,6 +320,6 @@ def main():
         return export_confluence_to_markdown(parse_confluence_destination(args.source)['page_id'], args.destination, get_confluence_client(secrets_file_path))
 
     if args.source and not args.destination:
-        return check_sync_status(args.source, get_credentials())
+        parser.error(f"unknown command: {args.source}")
 
     parser.print_help()
