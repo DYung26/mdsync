@@ -12,7 +12,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name='mdsync',
-    version='0.2.9',
+    version='0.3.2',
     description='Sync between Google Docs and Markdown files',
     long_description=long_description,
     long_description_content_type='text/markdown',
@@ -20,7 +20,7 @@ setup(
     author_email='',
     url='https://github.com/chasemp/mdsync',
     license='MIT',
-    py_modules=['mdsync'],
+    packages=find_packages(),
     python_requires='>=3.7',
     install_requires=[
         'google-auth>=2.23.0',
@@ -37,7 +37,7 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'mdsync=mdsync:main',
+            'mdsync=mdsync.cli:main',
         ],
     },
     classifiers=[

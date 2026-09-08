@@ -43,3 +43,5 @@ tab-*.md
 *_test.py
 base-document.md
 mdsync.zip
+
+.mdsync-state/
