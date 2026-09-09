@@ -53,47 +53,52 @@ from .urls import extract_doc_id, extract_doc_id_from_url, is_google_doc, is_con
 def main():
     parser = argparse.ArgumentParser(
         description='Sync between Google Docs, Confluence, and Markdown files',
-        epilog='Examples:\n'
-               '  # Google Docs\n'
-               '  %(prog)s https://docs.google.com/document/d/DOC_ID/edit output.md\n'
-               '  %(prog)s input.md DOC_ID\n'
+        epilog='Commands:\n'
+               '  auth                              Authenticate with Google\n'
+               '  repl                              Start the interactive REPL\n'
+               '  list [PATH]                       List Markdown files and metadata\n'
+               '  pull SOURCE [DESTINATION]         Pull Google Docs content into Markdown\n'
+               '  push SOURCE                       Push Markdown changes to Google Docs\n'
+               '  sync SOURCE                       Three-way sync local and remote changes\n'
+               '  resolve FILE                      Confirm a manually resolved conflict\n\n'
+               'Examples:\n'
+               '  # Pull a Google Doc\n'
+               '  %(prog)s pull DOC_ID ./docs/chronix-test\n'
+               '  %(prog)s pull DOC_ID ./docs/chronix-test/todo.md --tab todo\n'
+               '  %(prog)s pull DOC_ID ./docs --parent  # creates/uses ./docs/chronix-test/\n'
+               '  %(prog)s pull ./docs/chronix-test/todo.md\n\n'
+               '  # Push local changes\n'
+               '  %(prog)s push ./docs/chronix-test/todo.md\n'
+               '  %(prog)s push ./docs/chronix-test\n\n'
+               '  # Three-way sync\n'
+               '  %(prog)s sync ./docs/chronix-test/todo.md\n'
+               '  %(prog)s sync ./docs/chronix-test\n'
+               '  # After manually resolving a conflict:\n'
+               '  %(prog)s resolve ./docs/chronix-test/todo.md\n\n'
+               '  # Create a new Google Doc\n'
                '  %(prog)s input.md --create\n'
                '  %(prog)s input.md --create -u | pbcopy\n'
+               '  %(prog)s --directory file1.md file2.md --directory-title "Project Documentation"\n'
+               '  %(prog)s --create-empty\n\n'
+               '  # Google Docs administration\n'
                '  %(prog)s DOC_ID --list-revisions\n'
                '  %(prog)s DOC_ID --list-comments\n'
-               '  %(prog)s DOC_ID --lock\n\n'
-               '  # Directory-backed Google Docs\n'
-               '  %(prog)s --directory file1.md file2.md --directory-title "Project Documentation"\n'\
-               '  %(prog)s pull DOC_ID ./docs --parent\n'\
-               '  %(prog)s pull DOC_ID ./docs/chronix-test\n'\
-               '  %(prog)s pull ./docs/chronix-test\n'\
-               '  %(prog)s pull ./docs/chronix-test/Architecture.md\n'\
-               '  %(prog)s push ./docs/chronix-test\n'\
-               '  %(prog)s push ./docs/chronix-test/Architecture.md\n'\
-               '  %(prog)s auth\n\n'\
+               '  %(prog)s DOC_ID --lock --lock-reason "Maintenance"\n'
+               '  %(prog)s DOC_ID --lock-status\n'
+               '  %(prog)s DOC_ID --unlock\n\n'
                '  # Confluence\n'
                '  %(prog)s input.md confluence:SPACE/123456\n'
-               '  %(prog)s input.md --create-confluence --space ENG --title "My Page"\n'
                '  %(prog)s confluence:SPACE/123456 output.md\n'
-               '  %(prog)s https://site.atlassian.net/wiki/spaces/ENG/pages/123456 output.md\n\n'
-               '  # Push/pull (uses frontmatter URLs)\n'
-               '  %(prog)s push file.md  # Push local → remote\n'
-               '  %(prog)s pull file.md  # Pull remote → local\n\n'
-               '  # List frontmatter\n'
-               '  %(prog)s list [file_or_directory]\n'
-               '  %(prog)s list --check-status  # Check live frozen status\n'
-               '  %(prog)s list --check-status --diff  # Check sync status summary\n'
-               '  %(prog)s list --format json   # JSON output\n\n'
-               '  # Diff (dry run)\n'
+               '  %(prog)s input.md confluence:SPACE/123456 --diff\n\n'
+               '  # Diff without changing either side\n'
                '  %(prog)s file.md gdoc_url --diff\n'
                '  %(prog)s gdoc_url file.md --diff\n'
                '  %(prog)s file.md confluence:SPACE/123 --diff\n\n'
-               '  # Intelligent destination detection\n'
-               '  %(prog)s file.md  # Auto-detect from frontmatter',
+               'Run %(prog)s -h for the complete option list.',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('source', nargs='?', help='Source: Google Doc URL/ID, Confluence page, or Markdown file')
-    parser.add_argument('destination', nargs='?', help='Destination: Google Doc URL/ID, Confluence page, or Markdown file')
+    parser.add_argument('source', nargs='?', help='Command, source URL/ID, or Markdown file')
+    parser.add_argument('destination', nargs='?', help='Destination URL/ID or Markdown file')
     parser.add_argument('--create', action='store_true', help='Create a new Google Doc (use with markdown source)')
     parser.add_argument('--list-revisions', action='store_true', help='List revision history for a Google Doc')
     parser.add_argument('--lock', action='store_true', help='Lock a Google Doc to prevent editing')
@@ -105,19 +110,12 @@ def main():
     parser.add_argument('--confluence-lock-status', action='store_true', help='Check if a Confluence page is locked')
     parser.add_argument('--list-comments', action='store_true', help='List all comments from a Google Doc')
     parser.add_argument('--unresolved-only', action='store_true', help='Show only unresolved comments (use with --list-comments)')
-    parser.add_argument('--create-confluence', action='store_true', help='Create a new Confluence page (use with markdown source)')
-    parser.add_argument('--space', type=str, metavar='SPACE', help='Confluence space key (required with --create-confluence)')
-    parser.add_argument('--title', type=str, metavar='TITLE', help='Page title (required with --create-confluence, overrides frontmatter title)')
-    parser.add_argument('--parent-id', type=str, metavar='PARENT_ID', help='Parent page ID for new Confluence page')
-    parser.add_argument('--labels', type=str, metavar='LABELS', help='Comma-separated labels for Confluence page (combined with frontmatter labels)')
     parser.add_argument('--secrets-file', type=str, metavar='PATH', help='Path to secrets.yaml file (default: searches in current dir, ~/.config/mdsync/, ~/.mdsync/)')
     parser.add_argument('--create-empty', action='store_true', help='Create empty Google Doc')
     parser.add_argument('--directory', nargs='+', metavar='MARKDOWN_FILE', help='Create a new Google Doc with one real tab per Markdown file')
     parser.add_argument('--directory-title', type=str, metavar='TITLE', help='Title for a new directory-backed Google Doc')
     parser.add_argument('-u', '--url-only', action='store_true', help='Output only the URL (perfect for piping to pbcopy)')
-    parser.add_argument('-f', '--force', action='store_true', help='Skip confirmation when overwriting existing Google Doc links in frontmatter')
     parser.add_argument('--diff', action='store_true', help='Show diff between source and destination (markdown as common format)')
-    parser.add_argument('--format', type=str, choices=['text', 'json', 'markdown'], default='text', metavar='FORMAT', help='Output format: text, json, or markdown (default: text)')
     parser.add_argument('--version', action='version', version='mdsync 0.3.2', help='Show version information and exit')
 
     if len(sys.argv) > 1 and sys.argv[1] == 'auth':
@@ -149,8 +147,8 @@ def main():
         return
 
     if len(sys.argv) > 1 and sys.argv[1] == 'sync':
-        sp = argparse.ArgumentParser(prog='mdsync sync')
-        sp.add_argument('source')
+        sp = argparse.ArgumentParser(prog='mdsync sync', description='Three-way sync a Markdown file or directory with Google Docs')
+        sp.add_argument('source', help='Markdown file or directory to sync')
         sp.add_argument('--secrets-file', type=str, metavar='PATH')
         try:
             a = sp.parse_args(sys.argv[2:])
@@ -169,8 +167,8 @@ def main():
             sys.exit(1)
 
     if len(sys.argv) > 1 and sys.argv[1] == 'resolve':
-        rp = argparse.ArgumentParser(prog='mdsync resolve')
-        rp.add_argument('source')
+        rp = argparse.ArgumentParser(prog='mdsync resolve', description='Confirm a manually resolved Google Docs sync conflict')
+        rp.add_argument('source', help='Markdown file with a resolved conflict')
         rp.add_argument('--secrets-file', type=str, metavar='PATH')
         try:
             a = rp.parse_args(sys.argv[2:])
@@ -189,11 +187,19 @@ def main():
 
     if len(sys.argv) > 1 and sys.argv[1] in {'push', 'pull'}:
         cmd = sys.argv[1]
-        pp = argparse.ArgumentParser(prog=f'mdsync {cmd}')
-        pp.add_argument('source')
-        pp.add_argument('destination', nargs='?')
-        pp.add_argument('--parent', action='store_true', help='For pull, create/use a document-title directory under the destination')
-        pp.add_argument('--tab', metavar='TAB', help='For pull from a Google Doc, pull only the named tab into the destination file')
+        pp = argparse.ArgumentParser(
+            prog=f'mdsync {cmd}',
+            description=(
+                'Push Markdown changes to the linked Google Docs tabs'
+                if cmd == 'push' else
+                'Pull Google Docs content into Markdown files or directories'
+            ),
+        )
+        pp.add_argument('source', help='Markdown file/directory for push, or Google Doc/file/directory for pull')
+        if cmd == 'pull':
+            pp.add_argument('destination', nargs='?', help='Local Markdown file or directory')
+            pp.add_argument('--parent', action='store_true', help='Treat destination as a parent directory and create/use a document-title subdirectory inside it')
+            pp.add_argument('--tab', metavar='TAB', help='Pull only the named Google Docs tab into the destination file')
         pp.add_argument('--secrets-file', type=str, metavar='PATH')
         try:
             a = pp.parse_args(sys.argv[2:])
