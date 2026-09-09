@@ -21,6 +21,13 @@ def _sync_compare_content(content):
     return content.rstrip("\n")
 
 
+def get_drive_file_version(doc_id, creds):
+    """Return Google Drive's monotonically increasing file version."""
+    drive_service = build('drive', 'v3', credentials=creds)
+    metadata = drive_service.files().get(fileId=doc_id, fields='version').execute()
+    return metadata.get('version')
+
+
 def check_gdoc_frozen_status(doc_id: str, creds) -> bool:
     """Check if a Google Doc is frozen (locked) at runtime."""
     try:
@@ -517,6 +524,7 @@ def _replace_tab_content(docs_service, doc_id: str, tab_id: str, source_tab: dic
         raise ValueError(f'Tab not found: {tab_id}')
 
     target_body = target.get('documentTab', {}).get('body', {}).get('content', [])
+    font_family = _prevailing_font_family(target)
     if not target_body:
         raise ValueError(f'Tab has no writable body: {tab_id}')
 
@@ -551,6 +559,7 @@ def _replace_tab_content(docs_service, doc_id: str, tab_id: str, source_tab: dic
 
     # Reapply paragraph and basic text styles from the converted source.
     formatting_requests = []
+    font_requests = []
     position = 1
     for element in source_body:
         paragraph = element.get('paragraph')
@@ -588,6 +597,8 @@ def _replace_tab_content(docs_service, doc_id: str, tab_id: str, source_tab: dic
                 if key in style:
                     update[key] = style[key]
                     fields.append(key)
+            if font_family:
+                update.pop('weightedFontFamily', None)
             if fields:
                 formatting_requests.append({
                     'updateTextStyle': {
@@ -596,9 +607,18 @@ def _replace_tab_content(docs_service, doc_id: str, tab_id: str, source_tab: dic
                         'fields': ','.join(fields),
                     }
                 })
+            if font_family and run_text:
+                font_requests.append({
+                    'updateTextStyle': {
+                        'range': {'startIndex': text_position, 'endIndex': run_end, 'tabId': tab_id},
+                        'textStyle': {'weightedFontFamily': {'fontFamily': font_family}},
+                        'fields': 'weightedFontFamily',
+                    }
+                })
             text_position = run_end
         position = paragraph_end
 
+    formatting_requests.extend(font_requests)
     if formatting_requests:
         docs_service.documents().batchUpdate(
             documentId=doc_id,
@@ -611,6 +631,8 @@ def _replace_tab_content(docs_service, doc_id: str, tab_id: str, source_tab: dic
 def _paragraph_spans(tab):
     spans = []
     for element in tab.get("documentTab", {}).get("body", {}).get("content", []):
+        if not isinstance(element, dict):
+            continue
         paragraph = element.get("paragraph")
         if not paragraph:
             continue
@@ -637,6 +659,8 @@ def _source_paragraphs(source_tab):
     paragraphs = []
     body = source_tab.get("documentTab", {}).get("body", {}).get("content", [])
     for element in body:
+        if not isinstance(element, dict):
+            continue
         paragraph = element.get("paragraph")
         if paragraph is not None:
             text = "".join(
@@ -752,7 +776,56 @@ def _source_formatting_requests(source_tab, start_index, tab_id, source_markdown
     if paragraph_index != len(paragraphs):
         raise RuntimeError("Converted Markdown paragraphs do not match source Markdown")
     flush_bullet_group()
+    # Apply the target document's font last. Structural requests such as
+    # createParagraphBullets can cause Docs to recalculate paragraph styles;
+    # applying the inherited font after those requests makes the font choice
+    # authoritative instead of allowing the importer/default (often Arial) to
+    # win.
+    requests.extend(font_requests)
     return requests
+
+
+def _is_html_comment(line):
+    """Return whether a line is a standalone HTML comment.
+
+    HTML comments are non-rendering Markdown/HTML content, so Google Docs'
+    Markdown importer correctly omits them instead of creating a paragraph.
+    """
+    stripped = line.strip()
+    return stripped.startswith("<!--") and stripped.endswith("-->")
+
+
+def _empty_checkbox_source_tab():
+    """Build the minimal Docs-like structure for an empty Markdown checkbox.
+
+    The Drive Markdown importer drops ``- [ ]`` when there is no item text,
+    but the target document can still represent it as a checkbox paragraph.
+    """
+    return {
+        "documentTab": {
+            "body": {
+                "content": [{
+                    "startIndex": 1,
+                    "endIndex": 2,
+                    "paragraph": {
+                        "elements": [{"textRun": {"content": "\n"}}],
+                        "bullet": {"listId": "mdsync-empty-checkbox"},
+                    },
+                }]
+            }
+        }
+    }
+
+
+def _is_thematic_break(line):
+    """Return whether a standalone Markdown line is a thematic break."""
+    stripped = line.strip()
+    if len(stripped) < 3:
+        return False
+    for marker in ("-", "*", "_"):
+        if all(char == marker or char.isspace() for char in stripped) and stripped.count(marker) >= 3:
+            return True
+    return False
 
 
 def _converted_markdown_lines(lines, creds):
@@ -762,9 +835,24 @@ def _converted_markdown_lines(lines, creds):
         if line.strip() == "":
             converted.append((None, "\n", line))
             continue
+        if _is_html_comment(line):
+            # HTML comments are intentionally not rendered by Google Docs.
+            # Keep them out of the remote document while retaining the local
+            # Markdown line so a comment-only insertion is a no-op remotely.
+            converted.append((None, "", line))
+            continue
+        if line.strip() in ("- [ ]", "- [x]", "- [X]") and line.rstrip().endswith("]"):
+            converted.append((_empty_checkbox_source_tab(), "\n", line))
+            continue
         source_tab = _converted_document_body(line, creds)
         paragraphs = [(p, text) for p, text in _source_paragraphs(source_tab) if text != "\n"]
         if len(paragraphs) != 1:
+            if len(paragraphs) == 0 and _is_thematic_break(line):
+                # A Markdown thematic break has no paragraph in the importer.
+                # Represent it as a structural sentinel; _format_converted_lines
+                # turns the inserted paragraph into a Docs horizontal rule.
+                converted.append((None, "\n", line))
+                continue
             raise RuntimeError(
                 f"Markdown line converted to {len(paragraphs)} Google Docs paragraphs: {line!r}"
             )
@@ -772,8 +860,53 @@ def _converted_markdown_lines(lines, creds):
     return converted
 
 
-def _format_converted_lines(converted, start_index, tab_id):
+def _paragraph_font_family(paragraph):
+    if not isinstance(paragraph, dict):
+        return None
+    elements = paragraph.get('elements', [])
+    if not isinstance(elements, list):
+        return None
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        run = element.get('textRun')
+        if not isinstance(run, dict):
+            continue
+        style = run.get('textStyle', {})
+        if not isinstance(style, dict):
+            continue
+        family = style.get('weightedFontFamily', {})
+        if isinstance(family, dict):
+            family = family.get('fontFamily')
+            if family:
+                return family
+    return None
+
+
+def _prevailing_font_family(tab, preferred_index=None):
+    paragraphs = [(p, text) for p, text in _source_paragraphs(tab) if text != '\n']
+    if not paragraphs:
+        return None
+    if preferred_index is not None:
+        for paragraph, text in paragraphs:
+            if not isinstance(paragraph, dict):
+                continue
+            if paragraph.get('startIndex', 1) <= preferred_index <= paragraph.get('endIndex', preferred_index):
+                family = _paragraph_font_family(paragraph)
+                if family:
+                    return family
+    for paragraph, _ in paragraphs:
+        if not isinstance(paragraph, dict):
+            continue
+        family = _paragraph_font_family(paragraph)
+        if family:
+            return family
+    return None
+
+
+def _format_converted_lines(converted, start_index, tab_id, font_family=None):
     requests = []
+    font_requests = []
     position = start_index
     bullet_group = None
 
@@ -791,15 +924,48 @@ def _format_converted_lines(converted, start_index, tab_id):
         bullet_group = None
 
     for source_tab, paragraph_text, source_line in converted:
+        if font_family and paragraph_text:
+            font_requests.append({
+                "updateTextStyle": {
+                    "range": {"startIndex": position, "endIndex": position + len(paragraph_text), "tabId": tab_id},
+                    "textStyle": {"weightedFontFamily": {"fontFamily": font_family}},
+                    "fields": "weightedFontFamily",
+                }
+            })
         if source_tab is None:
             flush_bullet_group()
-            position += 1
+            if paragraph_text and _is_thematic_break(source_line):
+                requests.append({
+                    "updateParagraphStyle": {
+                        "range": {"startIndex": position, "endIndex": position + 1, "tabId": tab_id},
+                        "paragraphStyle": {
+                            "borderBottom": {
+                                "color": {"color": {"rgbColor": {"red": 0, "green": 0, "blue": 0}}},
+                                "width": {"magnitude": 1, "unit": "PT"},
+                                "padding": {"magnitude": 1, "unit": "PT"},
+                                "dashStyle": "SOLID",
+                            }
+                        },
+                        "fields": "borderBottom",
+                    }
+                })
+            if paragraph_text:
+                position += len(paragraph_text)
             continue
 
         paragraphs = _source_paragraphs(source_tab)
         paragraph = next((p for p, text in paragraphs if text != "\n"), None)
+        if paragraph is None and source_line.strip() in ("- [ ]", "- [x]", "- [X]"):
+            # The Markdown importer drops empty task text into a paragraph
+            # containing only its terminating newline. Keep that paragraph
+            # here so it can still be converted to a Docs checkbox.
+            paragraph = paragraphs[0][0] if paragraphs else None
         if paragraph is None:
-            raise RuntimeError(f"Converted Markdown line has no writable paragraph: {source_line!r}")
+            # Structural Markdown such as a thematic break has no paragraph
+            # to style. Its text representation has already been inserted;
+            # just advance the position for subsequent lines.
+            position += len(paragraph_text)
+            continue
         end = position + len(paragraph_text)
         named = paragraph.get("paragraphStyle", {}).get("namedStyleType")
         if named:
@@ -825,6 +991,15 @@ def _format_converted_lines(converted, start_index, tab_id):
                 bullet_group = (position, end, preset)
         else:
             flush_bullet_group()
+            # insertText inherits the paragraph/list properties at the insertion
+            # point. A plain Markdown line inserted at the start of an existing
+            # list can therefore become a list item even though its source line
+            # is not a list. Explicitly remove inherited bullets from this range.
+            requests.append({
+                "deleteParagraphBullets": {
+                    "range": {"startIndex": position, "endIndex": end, "tabId": tab_id}
+                }
+            })
 
         text_position = position
         for child in paragraph.get("elements", []):
@@ -851,6 +1026,9 @@ def _format_converted_lines(converted, start_index, tab_id):
         position = end
 
     flush_bullet_group()
+    # Font inheritance must be applied after all structural formatting.
+    # Otherwise Google Docs can restore the paragraph/list default font.
+    requests.extend(font_requests)
     return requests
 
 
@@ -860,7 +1038,13 @@ def apply_markdown_diff_to_tab(docs_service, doc_id, tab_id, baseline, local_con
     if not _find_tab_by_id(tabs, tab_id):
         raise ValueError(f"Tab not found: {tab_id}")
     remote_content = export_tab_to_markdown(docs_service, doc_id, tab_id)
-    if _sync_compare_content(remote_content) != _sync_compare_content(baseline):
+    # A newly-created Google Docs tab contains its mandatory terminating newline,
+    # while its logical content is empty. Treat that as the empty baseline used
+    # when creating a local tab, so the first directory push can populate it.
+    remote_matches_baseline = _sync_compare_content(remote_content) == _sync_compare_content(baseline)
+    if not remote_matches_baseline and not (
+        not _sync_compare_content(baseline) and not _sync_compare_content(remote_content)
+    ):
         raise RuntimeError("Google Docs tab changed since the last pull; pull again before pushing to avoid overwriting remote changes.")
     base_lines = _markdown_lines(baseline)
     local_lines = _markdown_lines(local_content)
@@ -873,6 +1057,7 @@ def apply_markdown_diff_to_tab(docs_service, doc_id, tab_id, baseline, local_con
         spans = _paragraph_spans(target)
         if i1 > len(spans) or i2 > len(spans):
             raise RuntimeError("Could not map Markdown diff to Google Docs paragraphs")
+        font_family = _prevailing_font_family(target, spans[i1]["start"] if i1 < len(spans) else None)
         if i1 == i2:
             insert_at = spans[i1]["start"] if i1 < len(spans) else (spans[-1]["end"] - 1 if spans else 1)
             delete_start = delete_end = insert_at
@@ -895,16 +1080,19 @@ def apply_markdown_diff_to_tab(docs_service, doc_id, tab_id, baseline, local_con
         if requests:
             docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
         if source_text:
-            formatting = _format_converted_lines(converted, insert_at, tab_id)
+            formatting = _format_converted_lines(converted, insert_at, tab_id, font_family)
             if formatting:
                 docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": formatting}).execute()
     return True
 
-def create_document_tab(docs_service, doc_id, title):
-    """Create a real Google Docs tab and return its tab ID."""
+def create_document_tab(docs_service, doc_id, title, parent_tab_id=None):
+    """Create a real Google Docs tab, optionally nested under a parent tab."""
+    properties = {'title': title}
+    if parent_tab_id:
+        properties['parentTabId'] = parent_tab_id
     response = docs_service.documents().batchUpdate(
         documentId=doc_id,
-        body={'requests': [{'addDocumentTab': {'tabProperties': {'title': title}}}]},
+        body={'requests': [{'addDocumentTab': {'tabProperties': properties}}]},
     ).execute()
     for reply in response.get('replies', []):
         properties = reply.get('addDocumentTab', {}).get('tabProperties', {})
@@ -962,7 +1150,14 @@ def _markdown_inline_from_runs(runs):
     return ''.join(result)
 
 
+def _is_horizontal_rule_paragraph(paragraph):
+    """Return whether a Docs paragraph is styled as a horizontal rule."""
+    return bool(paragraph.get("paragraphStyle", {}).get("borderBottom"))
+
+
 def _paragraph_to_markdown(paragraph):
+    if _is_horizontal_rule_paragraph(paragraph):
+        return "---"
     text = _markdown_inline_from_runs(paragraph.get('elements', []))
     style = paragraph.get('paragraphStyle', {})
     named = style.get('namedStyleType', '')
