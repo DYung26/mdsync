@@ -8,6 +8,7 @@ import yaml
 from .frontmatter import extract_frontmatter_metadata, update_frontmatter_metadata
 
 METADATA_FILENAME = '.mdsync.yaml'
+STATE_DIRNAME = '.mdsync-state'
 TAB_ID_KEY = 'gdoc_tab_id'
 
 
@@ -104,6 +105,6 @@ def unique_markdown_path(directory, title, reserved=None):
 
 
 def markdown_files(directory):
-    """Return Markdown tab files directly contained by a sync directory."""
+    """Return all Markdown tab files recursively contained by a sync directory."""
     path = Path(directory)
-    return sorted(p for p in path.glob('*.md') if p.is_file())
+    return sorted(p for p in path.rglob('*.md') if p.is_file() and STATE_DIRNAME not in p.parts)

@@ -9,6 +9,7 @@ from mdsync.directory import (
     safe_filename,
     save_directory_metadata,
     set_tab_metadata,
+    markdown_files,
 )
 from mdsync.gdocs import _paragraph_to_markdown, create_document_tab
 from mdsync.frontmatter import extract_frontmatter_metadata
@@ -57,6 +58,23 @@ class TabModelTests(unittest.TestCase):
         self.assertEqual(create_document_tab(service, 'doc1', 'Overview'), 't.new')
         self.assertEqual(service.documents_obj.body['requests'][0]['addDocumentTab']['tabProperties']['title'], 'Overview')
 
+    def test_create_child_tab_request(self):
+        service = FakeDocsService()
+        self.assertEqual(create_document_tab(service, 'doc1', 'Web', 't.parent'), 't.new')
+        properties = service.documents_obj.body['requests'][0]['addDocumentTab']['tabProperties']
+        self.assertEqual(properties['title'], 'Web')
+        self.assertEqual(properties['parentTabId'], 't.parent')
+
+    def test_markdown_files_are_recursive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'sandbox').mkdir()
+            (root / 'sandbox' / 'web').mkdir()
+            paths = [root / 'sandbox.md', root / 'sandbox' / 'web.md', root / 'sandbox' / 'web' / 'api.md']
+            for path in paths:
+                path.write_text('', encoding='utf-8')
+            self.assertEqual(markdown_files(root), sorted(paths))
+
     def test_docs_paragraph_to_markdown(self):
         paragraph = {
             'paragraphStyle': {'namedStyleType': 'HEADING_2'},
@@ -81,6 +99,21 @@ class TabModelTests(unittest.TestCase):
             ]}}
         }
         self.assertEqual(_source_text(source), 'one\ntwo\n')
+
+    def test_html_comment_is_non_rendering_markdown(self):
+        from mdsync.gdocs import _is_html_comment
+        self.assertTrue(_is_html_comment('<!-- hidden implementation note -->'))
+        self.assertTrue(_is_html_comment('<!-- multi-word comment -->\n'))
+        self.assertFalse(_is_html_comment('<!-- incomplete'))
+        self.assertFalse(_is_html_comment('visible text'))
+
+    def test_thematic_break_is_accepted_as_structural_markdown(self):
+        from mdsync.gdocs import _is_thematic_break
+        self.assertTrue(_is_thematic_break('---'))
+        self.assertTrue(_is_thematic_break('***'))
+        self.assertTrue(_is_thematic_break('_ _ _'))
+        self.assertFalse(_is_thematic_break('--'))
+        self.assertFalse(_is_thematic_break('not a rule'))
 
     def test_empty_markdown_has_no_phantom_terminal_line(self):
         from mdsync.gdocs import _markdown_lines
@@ -190,8 +223,8 @@ class ConflictStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'todo.md'
             path.write_text('resolved\n', encoding='utf-8')
-            save_conflict_state(path, 'tab1', 'base\n', 'remote\n')
-            self.assertEqual(load_conflict_state(path, 'tab1'), {'baseline': 'base\n', 'remote': 'remote\n'})
+            save_conflict_state(path, 'tab1', 'base\n', 'remote\n', '42')
+            self.assertEqual(load_conflict_state(path, 'tab1'), {'baseline': 'base\n', 'remote': 'remote\n', 'remote_version': '42'})
             clear_conflict_state(path, 'tab1')
             self.assertIsNone(load_conflict_state(path, 'tab1'))
 
