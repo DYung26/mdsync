@@ -32,9 +32,12 @@ def _conflict_path(markdown_path, tab_id):
     return state_dir / f'{digest}.conflict.json'
 
 
-def save_conflict_state(markdown_path, tab_id, baseline, remote):
+def save_conflict_state(markdown_path, tab_id, baseline, remote, remote_version=None):
     _conflict_path(markdown_path, tab_id).write_text(
-        json.dumps({'baseline': baseline, 'remote': remote}, ensure_ascii=False),
+        json.dumps(
+            {'baseline': baseline, 'remote': remote, 'remote_version': remote_version},
+            ensure_ascii=False,
+        ),
         encoding='utf-8',
     )
 
