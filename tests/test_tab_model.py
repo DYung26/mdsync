@@ -11,7 +11,11 @@ from mdsync.directory import (
     set_tab_metadata,
     markdown_files,
 )
-from mdsync.gdocs import _paragraph_to_markdown, create_document_tab
+from mdsync.gdocs import (
+    _is_horizontal_rule_element,
+    _paragraph_to_markdown,
+    create_document_tab,
+)
 from mdsync.frontmatter import extract_frontmatter_metadata
 
 
@@ -106,6 +110,24 @@ class TabModelTests(unittest.TestCase):
         self.assertTrue(_is_html_comment('<!-- multi-word comment -->\n'))
         self.assertFalse(_is_html_comment('<!-- incomplete'))
         self.assertFalse(_is_html_comment('visible text'))
+
+    def test_docs_horizontal_rule_paragraph_to_markdown(self):
+        paragraph = {
+            'paragraphStyle': {
+                'borderBottom': {
+                    'width': {'magnitude': 1, 'unit': 'PT'},
+                },
+            },
+            'elements': [{'textRun': {'content': '\n', 'textStyle': {}}}],
+        }
+        self.assertEqual(_paragraph_to_markdown(paragraph), '---')
+
+    def test_docs_horizontal_rule_element_to_markdown(self):
+        element = {'horizontalRule': {}}
+        self.assertTrue(_is_horizontal_rule_element(element))
+        self.assertFalse(_is_horizontal_rule_element({'textRun': {}}))
+        paragraph = {'elements': [element]}
+        self.assertEqual(_paragraph_to_markdown(paragraph), '---')
 
     def test_thematic_break_is_accepted_as_structural_markdown(self):
         from mdsync.gdocs import _is_thematic_break

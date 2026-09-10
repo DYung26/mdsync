@@ -1155,8 +1155,15 @@ def _is_horizontal_rule_paragraph(paragraph):
     return bool(paragraph.get("paragraphStyle", {}).get("borderBottom"))
 
 
+def _is_horizontal_rule_element(element):
+    """Return whether a Docs paragraph element is a horizontal rule."""
+    return "horizontalRule" in element
+
+
 def _paragraph_to_markdown(paragraph):
     if _is_horizontal_rule_paragraph(paragraph):
+        return "---"
+    if any(_is_horizontal_rule_element(element) for element in paragraph.get('elements', [])):
         return "---"
     text = _markdown_inline_from_runs(paragraph.get('elements', []))
     style = paragraph.get('paragraphStyle', {})
