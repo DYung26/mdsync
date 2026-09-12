@@ -428,7 +428,6 @@ def sync_file(markdown_path, creds=None, quiet=False):
             print(f"⚠ Conflicts written to {path}; resolve them, then run mdsync resolve {path} to confirm the final content.")
         return False
 
-    from .frontmatter import update_frontmatter_metadata
     title = extract_frontmatter_metadata(local_full).get('title') or path.stem
     path.write_text(update_frontmatter_metadata(merged, {'title': title, 'gdoc_tab_id': tab_id}), encoding='utf-8')
     if not quiet:
