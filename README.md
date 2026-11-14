@@ -366,3 +366,31 @@ On first run, the script will:
 - Point-in-time sync only (no continuous sync or conflict resolution)
 - Requires internet connection
 - Subject to Google API rate limits
+
+## Shared Google Docs with project tabs
+
+A single Google Doc can host multiple projects as top-level tabs. Initialize one local project directory against a specific tab with `--project-tab`; mdsync stores the shared document ID and the selected tab ID in `.mdsync.yaml`, then synchronizes only that tab and its descendants. The project root tab maps to `index.md`; its child tabs map beneath `index/`.
+
+```bash
+# Initialize the local docs tree for the "shaare" tab in a shared document
+mdsync pull "https://docs.google.com/document/d/DOCUMENT_ID/edit" \
+  ~/Projects/shaare/docs --project-tab shaare
+
+# Synchronize only the configured project tab and its descendants
+mdsync sync ~/Projects/shaare/docs
+
+# Push only local tab changes to the configured project subtree
+mdsync push ~/Projects/shaare/docs
+```
+
+`--project-tab` accepts an exact tab title or Google Docs tab ID. A configured root tab ID is validated on every scoped traversal; if it no longer exists, mdsync fails rather than falling back to syncing the entire shared document. Existing `.mdsync.yaml` files without `gdoc.root_tab_id` retain the original whole-document behavior.
+
+Example scoped `.mdsync.yaml`:
+
+```yaml
+gdoc:
+  doc_id: DOCUMENT_ID
+  url: https://docs.google.com/document/d/DOCUMENT_ID/edit
+  title: mes projets
+  root_tab_id: t.project
+```

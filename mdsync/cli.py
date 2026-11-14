@@ -198,6 +198,7 @@ def main():
         pp.add_argument('source', help='Markdown file/directory for push, or Google Doc/file/directory for pull')
         if cmd == 'pull':
             pp.add_argument('destination', nargs='?', help='Local Markdown file or directory')
+            pp.add_argument('--project-tab', metavar='TAB_TITLE_OR_ID', help='Initialize a project-scoped sync from one tab in a shared Google Doc')
             pp.add_argument('--parent', action='store_true', help='Treat destination as a parent directory and create/use a document-title subdirectory inside it')
             pp.add_argument('--tab', metavar='TAB', help='Pull only the named Google Docs tab into the destination file')
         pp.add_argument('--secrets-file', type=str, metavar='PATH')
@@ -248,7 +249,12 @@ def main():
             if not a.destination:
                 raise ValueError('A local destination is required when pulling from a Google Doc')
             destination = Path(a.destination)
-            if destination.suffix.lower() == '.md':
+            if a.project_tab:
+                if destination.suffix.lower() == '.md':
+                    raise ValueError('--project-tab requires a directory destination')
+                from .tab_sync import initialize_project_tab
+                initialize_project_tab(doc_id, a.project_tab, destination, creds)
+            elif destination.suffix.lower() == '.md':
                 if a.tab:
                     from .gdocs import _find_tab_by_title, _get_document_tabs
                     _, tabs = _get_document_tabs(build('docs', 'v1', credentials=creds), doc_id)
