@@ -639,11 +639,10 @@ def _paragraph_spans(tab):
         text = "".join(child.get("textRun", {}).get("content", "") for child in paragraph.get("elements", []) if "textRun" in child)
         spans.append({"start": element.get("startIndex", 1), "end": element.get("endIndex", element.get("startIndex", 1) + len(text)), "text": text, "paragraph": paragraph})
     if spans and spans[-1]["text"] == "\n" and not spans[-1]["paragraph"].get("bullet"):
-        # Docs' terminal paragraph is normally structural and should not map
-        # to a Markdown line. However, if it inherited bullet/list properties,
-        # export_tab_to_markdown represents it as an empty checklist item. Keep
-        # that span so targeted diffs can map trailing checklist lines correctly.
-        spans.pop()
+        # Preserve a terminal paragraph when it belongs to a checklist; a
+        # plain final newline is Google Docs structural padding.
+        if not spans[-1]["paragraph"].get("bullet"):
+            spans.pop()
     return spans
 
 
