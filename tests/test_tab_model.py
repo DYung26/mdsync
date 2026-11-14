@@ -4,6 +4,7 @@ from pathlib import Path
 
 from mdsync.directory import (
     get_document_id,
+    get_root_tab_id,
     get_tab_id,
     load_directory_metadata,
     safe_filename,
@@ -46,11 +47,12 @@ class TabModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / 'Project'
             directory.mkdir()
-            save_directory_metadata(directory, {'gdoc': {'doc_id': 'doc1', 'url': 'u', 'title': 'Project'}})
+            save_directory_metadata(directory, {'gdoc': {'doc_id': 'doc1', 'url': 'u', 'title': 'Project', 'root_tab_id': 't.project'}})
             file = directory / 'Overview.md'
             file.write_text('# Overview\n\nhello\n', encoding='utf-8')
             set_tab_metadata(file, 'tab1', 'Overview')
             self.assertEqual(get_document_id(load_directory_metadata(directory)), 'doc1')
+            self.assertEqual(get_root_tab_id(load_directory_metadata(directory)), 't.project')
             self.assertEqual(get_tab_id(file), 'tab1')
             self.assertEqual(extract_frontmatter_metadata(file.read_text())['title'], 'Overview')
 
@@ -136,6 +138,29 @@ class TabModelTests(unittest.TestCase):
         self.assertTrue(_is_thematic_break('_ _ _'))
         self.assertFalse(_is_thematic_break('--'))
         self.assertFalse(_is_thematic_break('not a rule'))
+
+    def test_paragraph_spans_keep_bulleted_terminal_paragraph(self):
+        from mdsync.gdocs import _paragraph_spans
+        tab = {
+            'documentTab': {'body': {'content': [
+                {'startIndex': 1, 'endIndex': 3, 'paragraph': {'elements': [{'textRun': {'content': 'one\n'}}]}},
+                {'startIndex': 3, 'endIndex': 4, 'paragraph': {'elements': [{'textRun': {'content': '\n'}}], 'bullet': {'listId': 'list1'}}},
+            ]}}
+        }
+        spans = _paragraph_spans(tab)
+        self.assertEqual(len(spans), 2)
+        self.assertEqual(spans[-1]['text'], '\n')
+
+    def test_paragraph_spans_omit_plain_terminal_paragraph(self):
+        from mdsync.gdocs import _paragraph_spans
+        tab = {
+            'documentTab': {'body': {'content': [
+                {'startIndex': 1, 'endIndex': 3, 'paragraph': {'elements': [{'textRun': {'content': 'one\n'}}]}},
+                {'startIndex': 3, 'endIndex': 4, 'paragraph': {'elements': [{'textRun': {'content': '\n'}}]}},
+            ]}}
+        }
+        spans = _paragraph_spans(tab)
+        self.assertEqual(len(spans), 1)
 
     def test_empty_markdown_has_no_phantom_terminal_line(self):
         from mdsync.gdocs import _markdown_lines
@@ -259,3 +284,56 @@ class SyncMessageTests(unittest.TestCase):
         self.assertIn('Google Docs changes detected; pulling remote changes into the local file.', text)
         self.assertIn('Local and Google Docs changes detected; changes do not conflict, merging and pushing.', text)
         self.assertIn('No local or Google Docs changes detected; nothing to sync.', text)
+
+
+class ProjectTabScopeTests(unittest.TestCase):
+    def test_scoped_tabs_returns_only_project_root(self):
+        from mdsync.tab_sync import _scoped_tabs
+        tabs = [
+            {'tabProperties': {'tabId': 't.one', 'title': 'one'}, 'childTabs': []},
+            {'tabProperties': {'tabId': 't.project', 'title': 'project'}, 'childTabs': [
+                {'tabProperties': {'tabId': 't.child', 'title': 'child'}, 'childTabs': []},
+            ]},
+            {'tabProperties': {'tabId': 't.other', 'title': 'other'}, 'childTabs': []},
+        ]
+        self.assertEqual(_scoped_tabs(tabs, 't.project'), [tabs[1]])
+
+    def test_scoped_tabs_keeps_legacy_whole_document_behavior(self):
+        from mdsync.tab_sync import _scoped_tabs
+        tabs = [{'tabProperties': {'tabId': 't.one'}}, {'tabProperties': {'tabId': 't.two'}}]
+        self.assertEqual(_scoped_tabs(tabs, None), tabs)
+
+    def test_missing_project_root_fails_closed(self):
+        from mdsync.tab_sync import _scoped_tabs
+        with self.assertRaisesRegex(ValueError, 'Configured project root tab does not exist'):
+            _scoped_tabs([{'tabProperties': {'tabId': 't.other'}}], 't.missing')
+
+
+class ProjectTabInitializationTests(unittest.TestCase):
+    def test_initialize_project_tab_uses_index_markdown_and_scoped_metadata(self):
+        from unittest.mock import patch
+        from mdsync.tab_sync import initialize_project_tab
+        remote_tree = {
+            'tabProperties': {'tabId': 't.project', 'title': 'shaare'},
+            'childTabs': [{
+                'tabProperties': {'tabId': 't.docs', 'title': 'architecture'},
+                'childTabs': [],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'docs'
+            fake_docs = object()
+            fake_drive = object()
+            with patch('mdsync.tab_sync.get_credentials', return_value=object()), \
+                 patch('mdsync.tab_sync.build', side_effect=[fake_docs, fake_drive]), \
+                 patch('mdsync.tab_sync._doc_title', return_value='mes projets'), \
+                 patch('mdsync.tab_sync._get_document_tabs', return_value=({}, [remote_tree])), \
+                 patch('mdsync.tab_sync.export_tab_to_markdown', side_effect=['# Shaare\n', '# Architecture\n']):
+                initialize_project_tab('doc-id', 'shaare', root, creds=object(), quiet=True)
+            from mdsync.directory import load_directory_metadata
+            metadata = load_directory_metadata(root)
+            self.assertEqual(metadata['gdoc']['doc_id'], 'doc-id')
+            self.assertEqual(metadata['gdoc']['root_tab_id'], 't.project')
+            self.assertIn('gdoc_tab_id: t.project', (root / 'index.md').read_text(encoding='utf-8'))
+            self.assertTrue((root / 'index' / 'architecture.md').exists())
+            self.assertEqual(extract_frontmatter_metadata((root / 'index.md').read_text())['gdoc_tab_id'], 't.project')

@@ -45,9 +45,18 @@ def get_document_url(metadata):
     return document.get('url') if isinstance(document, dict) else None
 
 
-def set_google_doc_metadata(directory, doc_id, url, title):
+def get_root_tab_id(metadata):
+    """Return the optional project-root tab ID within a shared Google Doc."""
+    document = metadata.get('gdoc')
+    return document.get('root_tab_id') if isinstance(document, dict) else None
+
+
+def set_google_doc_metadata(directory, doc_id, url, title, root_tab_id=None):
     metadata = load_directory_metadata(directory)
-    metadata['gdoc'] = {'doc_id': doc_id, 'url': url, 'title': title}
+    document = {'doc_id': doc_id, 'url': url, 'title': title}
+    if root_tab_id:
+        document['root_tab_id'] = root_tab_id
+    metadata['gdoc'] = document
     return save_directory_metadata(directory, metadata)
 
 

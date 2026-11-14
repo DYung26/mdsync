@@ -8,6 +8,7 @@ from googleapiclient.discovery import build
 from .auth import get_credentials
 from .directory import (
     get_document_id,
+    get_root_tab_id,
     get_tab_id,
     markdown_files,
     set_google_doc_metadata,
@@ -53,6 +54,26 @@ def _doc_url(doc_id):
 def _doc_title(drive_service, doc_id):
     file = drive_service.files().get(fileId=doc_id, fields='name').execute()
     return file.get('name') or 'Untitled'
+
+
+def _scoped_tabs(tabs, root_tab_id):
+    """Return the tab tree below a configured project root, or all tabs."""
+    if not root_tab_id:
+        return tabs
+
+    def find(items):
+        for tab in items or []:
+            if tab.get('tabProperties', {}).get('tabId') == root_tab_id:
+                return tab
+            match = find(tab.get('childTabs', []))
+            if match:
+                return match
+        return None
+
+    root = find(tabs)
+    if root is None:
+        raise ValueError(f"Configured project root tab does not exist: {root_tab_id}")
+    return [root]
 
 
 def _tab_files_by_id(directory):
@@ -106,9 +127,11 @@ def pull_document_to_directory(doc_id, destination, creds=None, parent=False, qu
     base = Path(destination)
     directory = base / title if parent else base
     directory.mkdir(parents=True, exist_ok=True)
-    set_google_doc_metadata(directory, doc_id, _doc_url(doc_id), title)
+    metadata = load_directory_metadata(directory)
+    root_tab_id = get_root_tab_id(metadata)
+    set_google_doc_metadata(directory, doc_id, _doc_url(doc_id), title, root_tab_id=root_tab_id)
     document, _ = _get_document_tabs(docs_service, doc_id)
-    roots = document.get('tabs', [])
+    roots = _scoped_tabs(document.get('tabs', []), root_tab_id)
     existing = _tab_files_by_id(directory)
 
     def pull_tree(tab, target_dir, parent_id=None):
@@ -137,6 +160,42 @@ def pull_document_to_directory(doc_id, destination, creds=None, parent=False, qu
 
     for root in roots:
         pull_tree(root, directory)
+    return directory
+
+
+
+def initialize_project_tab(doc_id, root_tab, destination, creds=None, quiet=False):
+    """Initialize a project-scoped sync root using index.md for the project tab."""
+    creds = creds or get_credentials()
+    docs_service = build('docs', 'v1', credentials=creds)
+    drive_service = build('drive', 'v3', credentials=creds)
+    document_title = _doc_title(drive_service, doc_id)
+    _, tabs = _get_document_tabs(docs_service, doc_id)
+    tab = _find_tab_by_id(tabs, root_tab) or _find_tab_by_title(tabs, root_tab)
+    if not tab:
+        raise ValueError(f"Google Docs project tab not found: {root_tab}")
+    root_id = tab['tabProperties']['tabId']
+    root_title = _tab_title(tab) or 'Project'
+    directory = Path(destination)
+    directory.mkdir(parents=True, exist_ok=True)
+    set_google_doc_metadata(directory, doc_id, _doc_url(doc_id), document_title, root_tab_id=root_id)
+
+    def pull_tree(current, output):
+        tab_id = current['tabProperties']['tabId']
+        title = _tab_title(current) or 'Untitled'
+        content = export_tab_to_markdown(docs_service, doc_id, tab_id)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(update_frontmatter_metadata(content, {'title': title, 'gdoc_tab_id': tab_id}), encoding='utf-8')
+        save_sync_state(output, tab_id, content)
+        clear_conflict_state(output, tab_id)
+        if not quiet:
+            print(f"  ✓ {title} -> {output}")
+        child_dir = output.parent / output.stem
+        for child in current.get('childTabs', []) or []:
+            child_path = child_dir / f"{safe_filename(_tab_title(child) or 'Untitled')}.md"
+            pull_tree(child, child_path)
+
+    pull_tree(tab, directory / 'index.md')
     return directory
 
 
@@ -492,11 +551,15 @@ def push_file(markdown_path, creds=None, quiet=False):
     tab_id = get_tab_id(path)
     if doc_id:
         docs_service = build('docs', 'v1', credentials=creds)
+        root_tab_id = get_root_tab_id(metadata)
+        parent_id = _parent_tab_id_for_path(path, _tab_files_by_id(directory))
+        if parent_id is None:
+            parent_id = root_tab_id
         if not tab_id:
-            tab_id = create_document_tab(docs_service, doc_id, _tab_title_for_file(path))
+            tab_id = create_document_tab(docs_service, doc_id, _tab_title_for_file(path), parent_id)
             set_tab_metadata(path, tab_id, _tab_title_for_file(path))
         elif not _find_tab_by_id(_get_document_tabs(docs_service, doc_id)[1], tab_id):
-            tab_id = create_document_tab(docs_service, doc_id, _tab_title_for_file(path))
+            tab_id = create_document_tab(docs_service, doc_id, _tab_title_for_file(path), parent_id)
             set_tab_metadata(path, tab_id, _tab_title_for_file(path))
         return _write_file_to_tab(path, doc_id, tab_id, creds, quiet)
     # Preserve the legacy one-file -> whole-document mode.
@@ -515,6 +578,7 @@ def push_directory(directory, creds=None, quiet=False):
     root = Path(directory)
     metadata = load_directory_metadata(root)
     doc_id = get_document_id(metadata)
+    root_tab_id = get_root_tab_id(metadata)
     if not doc_id:
         raise ValueError(f"{directory} has no {'.mdsync.yaml'} Google Doc metadata")
     docs_service = build('docs', 'v1', credentials=creds)
@@ -526,6 +590,8 @@ def push_directory(directory, creds=None, quiet=False):
         _, tabs = _get_document_tabs(docs_service, doc_id)
         if not tab_id or not _find_tab_by_id(tabs, tab_id):
             parent_id = _parent_tab_id_for_path(path, {})
+            if parent_id is None:
+                parent_id = root_tab_id
             tab_id = create_document_tab(docs_service, doc_id, title, parent_id)
             set_tab_metadata(path, tab_id, title)
         _write_file_to_tab(path, doc_id, tab_id, creds, quiet)
@@ -538,6 +604,7 @@ def sync_directory(directory, creds=None, quiet=False):
     root = Path(directory)
     metadata = load_directory_metadata(root)
     doc_id = get_document_id(metadata)
+    root_tab_id = get_root_tab_id(metadata)
     if not doc_id:
         raise ValueError(f"{directory} has no Google Doc metadata")
     docs_service = build('docs', 'v1', credentials=creds)
@@ -578,11 +645,29 @@ def sync_directory(directory, creds=None, quiet=False):
                     path.write_text(update_frontmatter_metadata(content, {'title': title}), encoding='utf-8')
                     if not quiet:
                         print(f"  ✓ Renamed local tab file: {path}")
+        child_directory = path.parent / path.stem
         for child in tab.get('childTabs', []) or []:
-            walk_remote(child, path.parent / safe_filename(title))
+            walk_remote(child, child_directory)
 
-    for tab in document.get('tabs', []) or []:
-        walk_remote(tab, root)
+    scoped_roots = _scoped_tabs(document.get('tabs', []), root_tab_id)
+    for tab in scoped_roots:
+        if root_tab_id and tab['tabProperties']['tabId'] == root_tab_id:
+            # A project root tab is represented by docs/index.md.
+            local_by_id.setdefault(root_tab_id, root / 'index.md')
+            root_file = root / 'index.md'
+            if not root_file.exists():
+                content = export_tab_to_markdown(docs_service, doc_id, root_tab_id)
+                root_file.write_text(update_frontmatter_metadata(content, {'title': _tab_title(tab), 'gdoc_tab_id': root_tab_id}), encoding='utf-8')
+                save_sync_state(root_file, root_tab_id, content)
+            else:
+                # Root's title is controlled by the Google Docs project tab.
+                content = root_file.read_text(encoding='utf-8')
+                root_file.write_text(update_frontmatter_metadata(content, {'title': _tab_title(tab), 'gdoc_tab_id': root_tab_id}), encoding='utf-8')
+            remote_ids.add(root_tab_id)
+            for child in tab.get('childTabs', []) or []:
+                walk_remote(child, root / 'index')
+        else:
+            walk_remote(tab, root)
 
     results = []
     for path in sorted(markdown_files(root), key=lambda p: (len(p.relative_to(root).parts), str(p))):
@@ -592,6 +677,8 @@ def sync_directory(directory, creds=None, quiet=False):
             continue
         title = _tab_title_for_file(path)
         parent_id = _parent_tab_id_for_path(path, local_by_id)
+        if parent_id is None:
+            parent_id = root_tab_id
         new_tab_id = create_document_tab(docs_service, doc_id, title, parent_id)
         set_tab_metadata(path, new_tab_id, title)
         # A newly created remote tab has no prior baseline; its current remote state
